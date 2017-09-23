@@ -166,6 +166,10 @@ public:
 };
 class CNames {
 public:
+    static int GetChunkCount() {
+        auto ptr = Read<ULONG_PTR>((PBYTE)GetBase() + NAME_OFFSET);
+        return Read<int>((PBYTE)ptr + 0x404);
+    }
     static const char* GetName(int id) {
         static char m_name[124];
         auto ptr = Read<ULONG_PTR>((PBYTE)GetBase() + NAME_OFFSET);
@@ -519,7 +523,7 @@ public:
         return GetClass().GetName() == name;
     }
     bool IsMulticastDelegate() { return Is("MulticastDelegateProperty"); }
-    bool IsFunction() { return Is("Function") || IsMulticastDelegate(); }
+    bool IsFunction() { return Is("Function"); }
     bool IsStruct() { return Is("StructProperty"); }
     bool IsFloat() { return Is("FloatProperty"); }
     bool IsBool() { return Is("BoolProperty"); }
@@ -528,6 +532,7 @@ public:
     bool IsWeakObject() { return Is("WeakObjectProperty"); }
     bool IsObject() { return Is("ObjectProperty") || IsWeakObject(); }
     bool IsInt() { return Is("IntProperty"); }
+    bool IsUIn32() { return Is("UInt32Property"); }
     bool IsUInt64() { return Is("UInt64Property"); }
     bool IsClass() { return Is("ClassProperty") || Is("Class"); }
     bool IsArray() { return Is("ArrayProperty"); }
@@ -599,7 +604,10 @@ public:
 
     }
     bool HasNext() {
-        return obj.Next != NULL;
+        char msg[124];
+        sprintf_s(msg, 124, "%p\n", obj.Next);
+        OutputDebugStringA(msg);
+        return obj.Next != NULL && (ULONG_PTR)obj.Next != 0xCCCCCCCCCCCCCCCC && (ULONG_PTR)obj.Next != 0;
     }
     UPropertyProxy GetNext() {
         return UPropertyProxy((ULONG_PTR)obj.Next);
@@ -653,6 +661,8 @@ public:
         auto c = *this;
         while (c.HasSuperClass()) {
             std::string className = c.GetName();
+            if (className.empty())
+                break;
             str.append(".").append(className);
             c = c.GetSuperClass();
         }
@@ -678,6 +688,7 @@ public:
     }
 };
 
+#define READ_WORLD
 void DoBoxScan() {
     //clear
     /*UINT iItems = SendMessage(hListBox, LB_GETCOUNT, 0, 0);
@@ -695,7 +706,7 @@ void DoBoxScan() {
     char szMsg[1024];
     sprintf_s(szMsg, 1024, "%p - %s", (LPVOID)w._this, w.GetName());
     vList.push_back(szMsg);
-
+#ifndef READ_WORLD
     //read objects instead of world
     int iCount = 0;
     bool bHasFilter = strlen(szFilter);
@@ -715,8 +726,7 @@ void DoBoxScan() {
         iCount++;
     }
     SET_STATUS(std::to_string(iCount).c_str());
-    /*
-    CWorld w = CWorld::GetInstance();
+#else
     auto actors = w.GetActors();
     for each (auto a in actors) {
     const char* name = a.GetName();
@@ -725,7 +735,8 @@ void DoBoxScan() {
     char szMsg[124];
     sprintf_s(szMsg, 124, "%p - %s",(LPVOID)a._this,name);
     vList.push_back(szMsg);
-    }*/
+    }
+#endif
 
     //LIST Actors
     //try to read process world actors and name list
@@ -817,6 +828,7 @@ std::string GetObjectValue(ULONG_PTR pObj, UPropertyProxy *pProperty, ULONG_PTR 
     //}else
     if (pProperty->IsByte()) { sprintf_s(szBuf, 124, "%i", Read<BYTE>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsInt()) { sprintf_s(szBuf, 124, "%i", Read<int>((LPBYTE)dwOffset)); return szBuf; }
+    else if (pProperty->IsUIn32()) { sprintf_s(szBuf, 124, "%i", Read<DWORD>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsUInt64()) { sprintf_s(szBuf, 124, "%Ii", Read<DWORD64>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsFloat()) { sprintf_s(szBuf, 124, "%f", Read<float>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsBool()) { strcpy_s(szBuf,124, Read<DWORD64>((LPBYTE)dwOffset) & pProperty->GetBitMask() ? "true" : "false"); return szBuf; }
@@ -849,6 +861,9 @@ std::string GetObjectValue(ULONG_PTR pObj, UPropertyProxy *pProperty, ULONG_PTR 
         }
         sArray += '"';
         return ws2s(sArray);
+    }
+    else if (pProperty->IsMulticastDelegate()) {
+        return "ScriptDeletage";
     }
     else if (pProperty->IsArray()) {
 
@@ -949,41 +964,21 @@ std::string GetHex(int val) {
     sprintf_s(msg, 124, "%x", val);
     return msg;
 }
-#include <functional>
-#include <algorithm>
 void DoPtrScan() {
     char buf[124];
     GetWindowTextA(hEdit2, buf,124);
     ULONG_PTR ptr = _strtoui64(buf, NULL, 16);
-    if (!ptr) {
-        std::string val = GetHex(offsetof(UFunction, FunctionFlags));
-        //MessageBoxA(0, val.c_str(), val.c_str(), 0);
-        for (int i = 0; i < CObjects::GetCount();i++) {
-            UObjectProxy a(CObjects::GetObject(i));
-            if (a.ptr == 0)
-                continue;
-            if (a.GetClass().As<UClassProxy>().IsFunction()) {
-
-                std::string str = a.GetName();
-                if (strstr(str.c_str(), "DrawRect")) {
-                    MessageBoxA(0, str.c_str(), str.c_str(), 0);
-                    break;
-                }
-            }
-        }
-        //scan for function drawrect
-        return;
-    }
     UObjectProxy p = UObjectProxy(ptr);
     UClassProxy c = p.GetClass().As<UClassProxy>();
     //..
     //check class
-    std::string status = p.GetName().append(" ").append(c.GetFullClass());
+    std::string status = std::to_string(p.GetId()).append(" ").append(p.GetName()).append(" ").append(c.GetFullClass());
     SET_STATUS(status.c_str());
     std::vector< UPropertyProxy> vProperty;
     SendMessage(hListView, LVM_DELETEALLITEMS, 0, 0);
     //find structure and dump it here..
     int structSize = 0;
+    int iLoops = 0;
     while (c.HasSuperClass()) {
         structSize += c.GetSize();
         //print size
@@ -1092,7 +1087,7 @@ void DoPtrScan() {
             else {
                 auto arrayDim = f.GetArrayDim();
                 if (arrayDim > 1) {
-                    DWORD nSize = (vProperty[i + 1].GetOffset() - f.GetOffset()) / arrayDim;
+                    DWORD nSize = i + 1 < vProperty.size() ? (vProperty[i + 1].GetOffset() - f.GetOffset()) / arrayDim : arrayDim*size;
                     for (DWORD j = 0; j < arrayDim ; j++) {
                         char name[124];
 
@@ -1107,7 +1102,15 @@ void DoPtrScan() {
                 std::string name = /*std::to_string(size) + */f.GetName();
                 AddItem(offset, name, value);
             }
-            offset += size;
+            if (f.IsBool()) {
+                //check if next val has diff offset
+                if (i+1 < vProperty.size() && dwOffset != vProperty[i + 1].GetOffset()) {
+                    offset += 1;
+                }
+            }
+            else {
+                offset += size;
+            }
         }
         if (offset < structSize) {
             int size = structSize - offset;
