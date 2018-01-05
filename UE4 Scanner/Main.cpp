@@ -8,9 +8,9 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define WINRPM
 
-#define WORLD_OFFSET 0x37D67A8 //48 8B 1D ?? ?? ?? ?? 74 40
-#define OBJECTS_OFFSET 0x36E1C40 //48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D6 48 89 B5
-#define NAME_OFFSET 0x36D9590 //48 89 1D ?? ?? ?? ?? 48 8B 5C 24 ?? 48 83 C4 28 C3 48 8B 5C 24 ?? 48 89 05 ?? ?? ?? ?? 48 83 C4 28 C3
+#define WORLD_OFFSET 0x040211D0 //48 8B 1D ?? ?? ?? ?? 48 85 DB 74 3B 41
+#define OBJECTS_OFFSET 0x03F0C080 //48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D6 48 89 B5
+#define NAME_OFFSET 0x03F036C8 //48 89 1D ?? ?? ?? ?? 48 8B 5C 24 ?? 48 83 C4 28 C3 48 8B 5C 24 ?? 48 89 05 ?? ?? ?? ?? 48 83 C4 28 C3
 
 
 BOOL WINAPI ReadProcessMemoryCallback(_In_ HANDLE hProcess, _In_ LPCVOID lpBaseAddress, LPVOID lpBuffer, _In_ SIZE_T nSize, _Out_opt_ SIZE_T * lpNumberOfBytesRead)
@@ -132,6 +132,7 @@ public:
     __int32 Flags; //0x0008
     __int32 ClusterIndex; //0x000C
     __int32 SerialNumber; //0x0010
+    __int32 SerialNumber2; //0x0010
 };
 
 class TUObjectArray
@@ -192,23 +193,57 @@ public:
         return CNames::GetName(GetId());//"name";
     }
 };
+
+#pragma pack(push,1)
+struct encryptedActor
+{
+	uint64_t ptr_table[0x2B];
+	uint16_t index;
+	byte  unk2[0x6];
+	uint16_t xor;
+	byte  unk3[0x6];
+};
+#pragma pack(pop)
 class CWorld : public AActor{
 public:
     CWorld(ULONG_PTR ptr) : AActor(ptr) {
     }
-    std::vector<AActor> GetActors() {
-        ULONG_PTR level = ReadInt((LPBYTE)_this + 0x30);
-        //read array a0
-        TArray<ULONG_PTR> buf = Read<TArray<ULONG_PTR>>((LPBYTE)level+0xA0);
-        std::vector<AActor> v;
-        for (int i = 0; i < buf.Count;i++) {
-            ULONG_PTR ptr = Read<ULONG_PTR>((LPBYTE)buf.Data + (i * 8));
-            if(ptr)
-                v.push_back(AActor(ptr));
-        }
-        //get level and list actors
-        return v;
-    };
+	std::vector<AActor> GetActors() {
+		ULONG_PTR level = ReadInt((LPBYTE)_this + 0x30);
+		//read array a0
+		TArray<ULONG_PTR> buf = Read<TArray<ULONG_PTR>>((LPBYTE)level + 0xA0);
+		std::vector<AActor> v;
+		for (int i = 0; i < buf.Count; i++) {
+			ULONG_PTR ptr = Read<ULONG_PTR>((LPBYTE)buf.Data + (i * 8));
+			if (ptr)
+				v.push_back(AActor(ptr));
+		}
+		//get level and list actors
+		return v;
+	};
+	std::vector<AActor> GetEncActors() {
+		static PBYTE EncryptionTable = (PBYTE)GetBase() + 0x397B5A0;
+		ULONG_PTR level = ReadInt((LPBYTE)_this + 0x30);
+		//read array a0
+		TArray<ULONG_PTR> buf = Read<TArray<ULONG_PTR>>((LPBYTE)level + 0xA0);
+		std::vector<AActor> v;
+		for (int i = 0; i < buf.Count; i++) {
+			encryptedActor encActor = Read<encryptedActor>((LPBYTE)buf.Data + (i * sizeof(encryptedActor)));
+
+			DWORD decoded_xor = encActor.xor ^ 0xCBAC;
+			DWORD decoded_Index = encActor.index ^ 0xD7AF5ABC;
+			DWORD Xor1 = ReadInt(EncryptionTable + 4 * (((byte)(decoded_Index)) + 0x300));
+			DWORD Xor2 = ReadInt(EncryptionTable + 4 * (((byte)((DWORD)decoded_Index >> 0x8)) + 0x200));
+			DWORD Xor3 = ReadInt(EncryptionTable + 4 * (((byte)((DWORD)decoded_Index >> 0x10)) + 0x100));
+			DWORD Xor4 = ReadInt(EncryptionTable + 4 * (DWORD)(decoded_Index >> 0x18));
+			DWORD Real_Index = (Xor1 ^ Xor2 ^ Xor3 ^ ~Xor4) % 0x2B;
+			DWORD_PTR pAActor = encActor.ptr_table[Real_Index] ^ decoded_xor;
+			if (pAActor)
+				v.push_back(AActor(pAActor));
+		}
+		//get level and list actors
+		return v;
+	};
     static CWorld GetInstance() {
         return CWorld(Read<ULONG_PTR>((PBYTE)GetBase() + WORLD_OFFSET));
         //m_uProcessBaseAddress+0x037D0528
@@ -342,6 +377,7 @@ static HWND showWindow()
     // Here we put the info on the Coulom headers
     // this is not data, only name of each header we like
     memset(&LvCol, 0, sizeof(LvCol));                  // Zero Members
+
     LvCol.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;    // Type of mask
     LvCol.cx = 0x28;                                   // width between each coloum
     LvCol.pszText = "Offset";                            // First Header Text
@@ -416,6 +452,18 @@ public:
     int32_t MinAlignment;
     char pad_0x0048[0x40];
 };
+class UProperty : public UField
+{
+	using UField::UField;
+public:
+	__int32 ArrayDim; //0x0030 
+	__int32 ElementSize; //0x0034 
+	FQWord PropertyFlags; //0x0038
+	__int32 PropertySize; //0x0040 
+	char pad_0x0044[0xC]; //0x0044
+	__int32 Offset; //0x0050 
+	char pad_0x0054[0x24]; //0x0054
+};
 class UFunction : public UStruct
 {
 public:
@@ -427,7 +475,7 @@ public:
     __int16 ReturnValueOffset; //0x0092
     __int16 RPCId; //0x0094
     __int16 RPCResponseId; //0x0096
-    class UProperty* FirstPropertyToInit; //0x0098
+    UProperty* FirstPropertyToInit; //0x0098
     UFunction* EventGraphFunction; //0x00A0
     __int32 EventGraphCallOffset; //0x00A8
     char pad_0x00AC[0x4]; //0x00AC
@@ -445,18 +493,6 @@ public:
     char pad_0x0088[0x198]; //0x0088
 };
 
-class UProperty : public UField
-{
-    using UField::UField;
-public:
-    __int32 ArrayDim; //0x0030 
-    __int32 ElementSize; //0x0034 
-    FQWord PropertyFlags; //0x0038
-    __int32 PropertySize; //0x0040 
-    char pad_0x0044[0xC]; //0x0044
-    __int32 Offset; //0x0050 
-    char pad_0x0054[0x24]; //0x0054
-};
 class UBoolProperty : public UProperty
 {
 public:
@@ -532,6 +568,7 @@ public:
     bool IsWeakObject() { return Is("WeakObjectProperty"); }
     bool IsObject() { return Is("ObjectProperty") || IsWeakObject(); }
     bool IsInt() { return Is("IntProperty"); }
+    bool IsInt8() { return Is("Int8Property"); }
     bool IsUIn32() { return Is("UInt32Property"); }
     bool IsUInt64() { return Is("UInt64Property"); }
     bool IsClass() { return Is("ClassProperty") || Is("Class"); }
@@ -606,7 +643,7 @@ public:
     bool HasNext() {
         char msg[124];
         sprintf_s(msg, 124, "%p\n", obj.Next);
-        OutputDebugStringA(msg);
+        //OutputDebugStringA(msg);
         return obj.Next != NULL && (ULONG_PTR)obj.Next != 0xCCCCCCCCCCCCCCCC && (ULONG_PTR)obj.Next != 0;
     }
     UPropertyProxy GetNext() {
@@ -688,6 +725,7 @@ public:
     }
 };
 
+
 #define READ_WORLD
 void DoBoxScan() {
     //clear
@@ -703,6 +741,7 @@ void DoBoxScan() {
     //add world because its out of objects
     CWorld w = CWorld::GetInstance();
 
+
     char szMsg[1024];
     sprintf_s(szMsg, 1024, "%p - %s", (LPVOID)w._this, w.GetName());
     vList.push_back(szMsg);
@@ -711,23 +750,28 @@ void DoBoxScan() {
     int iCount = 0;
     bool bHasFilter = strlen(szFilter);
     for (int i = 0; i < CObjects::GetCount();i++) {
+		auto ptr = CObjects::GetObject(i);
+		sprintf_s(szMsg, 1024, "Test: %08X", ptr);
+		OutputDebugStringA(szMsg);
         UObjectProxy a(CObjects::GetObject(i));
         if (a.ptr == 0)
             continue;
         std::string name = a.GetName();
+        sprintf_s(szMsg, 1024, "%i - %p - %s",i, (LPVOID)a.ptr, name.c_str());
+        OutputDebugStringA(szMsg);
         //ignore fields
         if (a.IsIgnore() || a.GetClass().As<UClassProxy>().IsIgnore())
             continue;
         if (bHasFilter && !StrStrI(name.c_str(), szFilter))
             continue;
-        char szMsg[1024];
         sprintf_s(szMsg, 1024, "%p - %s", (LPVOID)a.ptr, name.c_str());
         vList.push_back(szMsg);
         iCount++;
     }
     SET_STATUS(std::to_string(iCount).c_str());
 #else
-    auto actors = w.GetActors();
+	auto actors = w.GetActors();
+	//auto actors = w.GetEncActors();
     for each (auto a in actors) {
     const char* name = a.GetName();
     if (strlen(szFilter) && !StrStrI(name,szFilter))
@@ -747,7 +791,7 @@ void DoBoxScan() {
     }
 
 }
-void AddItem(int offset,std::string name,std::string value) {
+void AddItem(int offset,std::string name,std::string value,ULONG_PTR lParam = 0) {
     LVITEM LvItem;
     memset(&LvItem, 0, sizeof(LvItem)); // Zero struct's Members
 
@@ -755,14 +799,15 @@ void AddItem(int offset,std::string name,std::string value) {
 
     char msg[1024*4];
     sprintf_s(msg, 124, "%04X", offset);
-
-    LvItem.mask = LVIF_TEXT;   // Text Style
+	LvItem.lParam = (LPARAM)lParam;// "Test";
+    LvItem.mask = LVIF_TEXT| LVIF_PARAM;   // Text Style
     LvItem.cchTextMax = 256; // Max size of test
     LvItem.iItem = ListView_GetItemCount(hListView);          // choose item  
     LvItem.iSubItem = 0;       // Put in first coluom
     LvItem.pszText = msg;//"00"; // Text to display (can be from a char variable) (Items)
     SendMessage(hListView, LVM_INSERTITEM, 0, (LPARAM)&LvItem); // Send info to the Listview
 
+	LvItem.mask = LVIF_TEXT;
     strcpy_s(msg, 1024, name.c_str());
     LvItem.iSubItem = 1;
     LvItem.pszText = msg;//(LPSTR)p.GetName().c_str();//"Name";
@@ -816,7 +861,7 @@ std::string ws2s(const std::wstring& wstr)
 
     return converterX.to_bytes(wstr);
 }
-std::string GetObjectValue(ULONG_PTR pObj, UPropertyProxy *pProperty, ULONG_PTR dwOffset = -1) {
+std::string GetObjectValue(ULONG_PTR pObj, UPropertyProxy *pProperty, ULONG_PTR dwOffset,ULONG_PTR &lParam) {
     static char szBuf[1024];
     if (dwOffset == -1) { //get from prop
         //dwOffset = pProperty->Offset;
@@ -828,6 +873,7 @@ std::string GetObjectValue(ULONG_PTR pObj, UPropertyProxy *pProperty, ULONG_PTR 
     //}else
     if (pProperty->IsByte()) { sprintf_s(szBuf, 124, "%i", Read<BYTE>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsInt()) { sprintf_s(szBuf, 124, "%i", Read<int>((LPBYTE)dwOffset)); return szBuf; }
+    else if (pProperty->IsInt8()) { sprintf_s(szBuf, 124, "%i", Read<char>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsUIn32()) { sprintf_s(szBuf, 124, "%i", Read<DWORD>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsUInt64()) { sprintf_s(szBuf, 124, "%Ii", Read<DWORD64>((LPBYTE)dwOffset)); return szBuf; }
     else if (pProperty->IsFloat()) { sprintf_s(szBuf, 124, "%f", Read<float>((LPBYTE)dwOffset)); return szBuf; }
@@ -840,6 +886,7 @@ std::string GetObjectValue(ULONG_PTR pObj, UPropertyProxy *pProperty, ULONG_PTR 
     }//return QString(fData->GetName()).prepend("FName "); }
     else if (pProperty->IsObject()) {
         UObjectProxy p(Read<ULONG_PTR>((LPBYTE)dwOffset));
+		lParam = p.ptr;
         if (!p.ptr) return "NULL";
         sprintf_s(szBuf, 124, "%s* [%p]",p.GetName().c_str(),(LPBYTE)p.ptr);
         return szBuf;
@@ -871,7 +918,10 @@ std::string GetObjectValue(ULONG_PTR pObj, UPropertyProxy *pProperty, ULONG_PTR 
         std::string sPropertyTypeInner = pProperty->GetInner().GetName();
         std::string sArray;
         for (int i = 0; i < buf.Count;i++) {
-            ULONG_PTR ptr = Read<ULONG_PTR>((LPBYTE)buf.Data + (i * 8));
+			ULONG_PTR ptr = Read<ULONG_PTR>((LPBYTE)buf.Data + (i * 8));
+			if (i == 0) {
+				lParam = ptr;
+			}
             char szPtr[32];
             sprintf_s(szPtr, 32, "%p", (LPBYTE)ptr);
             sArray += szPtr + std::string(",");
@@ -964,10 +1014,59 @@ std::string GetHex(int val) {
     sprintf_s(msg, 124, "%x", val);
     return msg;
 }
+
+class CApp {
+public:
+    HMODULE hModule;
+    char szDllPath[MAX_PATH];
+    void BaseUponModule(HMODULE _hModule) {
+        hModule = _hModule;
+        if (GetModuleFileNameA(hModule, szDllPath, MAX_PATH)) {
+            for (UINT i = strlen(szDllPath); i > 0; i--) {
+                if (szDllPath[i] == '\\') {
+                    szDllPath[i] = 0;
+                    break;
+                }
+            }
+        }
+    }
+    void AddToLogFileA(char* szFile, LPTSTR szFormat, ...) {
+        char szPath[MAX_PATH];
+        sprintf_s(szPath, MAX_PATH, "%s\\%s", szDllPath, szFile);
+        //MessageBoxA(0, szPath, szPath, 0);
+        HGLOBAL hgBuffer;
+        va_list	vaarg;
+
+        hgBuffer = GlobalAlloc(GPTR, 1024);
+
+        va_start(vaarg, szFormat);
+        wvsprintf((LPTSTR)hgBuffer, szFormat, vaarg);
+        char* str = (LPTSTR)hgBuffer;
+
+        FILE* f;
+        fopen_s(&f, szPath, "a+");
+        fwrite(str, 1, strlen(str), f);
+        printf("%s\r\n", str);
+        fwrite("\r\n", 1, 2, f);
+
+        fclose(f);
+
+        GlobalFree(hgBuffer);
+    }
+    std::string GetMyDllPath() {
+        return szDllPath;
+    }
+} gApp;
+#include <algorithm>
+#include <functional>
 void DoPtrScan() {
     char buf[124];
     GetWindowTextA(hEdit2, buf,124);
     ULONG_PTR ptr = _strtoui64(buf, NULL, 16);
+    if (!ptr) {
+        //Do0Scan();
+        return;
+    }
     UObjectProxy p = UObjectProxy(ptr);
     UClassProxy c = p.GetClass().As<UClassProxy>();
     //..
@@ -1059,11 +1158,12 @@ void DoPtrScan() {
                     AddItem(f.GetOffset(), f.GetFullName(), "ARRAY DIM0");
                     continue;
                 }
-                OutputDebugStringA(f.GetName().c_str());
+                //OutputDebugStringA(f.GetName().c_str());
                 //auto pScriptStruct = ((UStructProperty *)pProperty)->Struct;
-                std::string value = GetObjectValue(ptr, &f, offset +f.GetOffset());//"value";
+				ULONG_PTR lParam = 0;
+                std::string value = GetObjectValue(ptr, &f, offset +f.GetOffset(), lParam);//"value";
                 std::string name = structName;
-                AddItem(offset +f.GetOffset(), name.append(".").append(f.GetName()), value);
+                AddItem(offset +f.GetOffset(), name.append(".").append(f.GetName()), value, lParam);
             }
         }
     };
@@ -1098,9 +1198,10 @@ void DoPtrScan() {
                     continue;
                 }
                 //auto pScriptStruct = ((UStructProperty *)pProperty)->Struct;
-                std::string value = GetObjectValue(ptr, &f, f.GetOffset());//"value";
+				ULONG_PTR lParam = 0;
+                std::string value = GetObjectValue(ptr, &f, f.GetOffset(), lParam);//"value";
                 std::string name = /*std::to_string(size) + */f.GetName();
-                AddItem(offset, name, value);
+                AddItem(offset, name, value, lParam);
             }
             if (f.IsBool()) {
                 //check if next val has diff offset
@@ -1123,6 +1224,43 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 {
     switch (message)
     {
+	case WM_NOTIFY:
+		// When right button clicked on mouse
+		if ((((LPNMHDR)lParam)->hwndFrom) == hListView)
+		{
+			switch (((LPNMHDR)lParam)->code)
+			{
+			case NM_RCLICK:
+			{
+				HMENU hPopupMenu = CreatePopupMenu();
+				POINT p;
+				if (GetCursorPos(&p))
+				{
+					//cursor position now in p.x and p.y
+				}
+				//InsertMenu(hPopupMenu, 1, MF_BYCOMMAND | MF_STRING, NULL, ("play"));
+				AppendMenu(hPopupMenu, MF_STRING, 1, ("Follow"));
+				SetForegroundWindow(hWnd);
+				DWORD iRet = TrackPopupMenu(hPopupMenu, TPM_TOPALIGN | TPM_LEFTALIGN | TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0, hWnd, NULL);
+				if (iRet > 0) {
+					int ItemIndex = SendMessage(hListView, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
+					LVITEM SelectedItem;
+					SelectedItem.iItem = ItemIndex;
+					ListView_GetItem(hListView, (LVITEM*)&SelectedItem);
+					char msg[124];
+					sprintf_s(msg, 124, "%p",(char*)SelectedItem.lParam);
+					SetWindowTextA(hEdit2, msg);
+					DoPtrScan();
+					//MessageBoxA(0, msg, msg, 0);
+
+				}
+				break;
+			}
+			break;
+			}
+			break;
+		}
+		break;
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
